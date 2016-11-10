@@ -55,12 +55,12 @@ func TestIntegrationPackageEnd2End(t *testing.T) {
 		}
 		defer subs.Close()
 
-		reader, err := rbs.SyncReader(
+		reader, err := rbs.NewSyncReader(
 			context.Background(),
-			rbs.NewReader(rx, name, rbs.Lookahead(3)),
+			rbs.NewReader(rx, name, rbs.ReadLookahead(3)),
 			subs,
-			rbs.StdSync(),
-			rbs.Starve(time.Second),
+			rbs.SyncStdSub(),
+			rbs.SyncStarve(time.Second),
 		)
 		if err != nil {
 			return
@@ -88,10 +88,10 @@ func TestIntegrationPackageEnd2End(t *testing.T) {
 	writer, err := rbs.NewWriter(
 		tx,
 		name,
-		rbs.MaxChunkSize(256),
-		rbs.MinChunkSize(64),
-		rbs.Expires(120),
-		rbs.Publish(),
+		rbs.WriteMaxChunk(256),
+		rbs.WriteMinChunk(64),
+		rbs.WriteExpire(120),
+		rbs.WriteStdPub(),
 	)
 	if err != nil {
 		t.Errorf("Unexpected error: %v\n", err)

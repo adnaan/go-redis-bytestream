@@ -20,7 +20,9 @@ const chunkLast = "c:last"
 // stream, or we do, and have not received that data yet.
 var ErrStarveEOF = errors.New("data not yet available")
 
-type rbsReader struct {
+// RedReader is the implementation that retrieves a variable-length stream
+// of bytes from a Redis hash, as written by its RedWriter counterpart
+type RedReader struct {
 	quit bool
 	conn redis.Conn
 	name string
@@ -30,42 +32,59 @@ type rbsReader struct {
 	peek uint8
 }
 
-// // LookaheadReader creates a reader that will attempt to reduce number of
-// // `Read`s (and therefore network hits & Redis utilization) by
-// // optimistically fetching multiple chunks
-// // Receiving a `io.ErrShortBuffer` is not necessarily a fatal condition: if
-// // it was caused by the cumulative size of peeks, a subsequent `Read` might
-// // succeed; if any single chunk is greater in size than the buffer, then the
-// // only hope is to use a larger buffer to succeed or progress along
-// // the stream.
-// func LookaheadReader(conn redis.Conn, name string, peek uint8) io.ReadCloser {
-// 	return &rbsReader{conn: conn, name: name, peek: peek}
-// }
-
-// NewReader TODO: Needs description!
-func NewReader(conn redis.Conn, name string, options ...func(*rbsReader)) io.ReadCloser {
-	r := &rbsReader{conn: conn, name: name}
+// NewReader creates an io.ReadCloser that assembles a byte stream as
+// stored in complete chunks on a Redis hash.
+// The underlying implementation is a *RedReader, and is the intended
+// counterpart to the *RedWriter.
+//
+// The name parameter is used as the key for the Redis hash.
+//
+// Configuration is by functional options, as inspired by this blog post:
+// http://dave.cheney.net/2014/10/17/functional-options-for-friendly-apis
+//
+// See: ReadLookahead
+func NewReader(conn redis.Conn, name string, options ...func(*RedReader)) io.ReadCloser {
+	r := &RedReader{conn: conn, name: name}
 	for _, option := range options {
 		option(r)
 	}
 	return r
 }
 
-// Lookahead sets the number of chunks to optimistically look for when
+// ReadLookahead sets the number of chunks to optimistically look for when
 // hitting the network doing a single fetch from Redis
-func Lookahead(peek uint8) func(*rbsReader) {
-	return func(r *rbsReader) {
+func ReadLookahead(peek uint8) func(*RedReader) {
+	return func(r *RedReader) {
 		r.peek = peek
 	}
 }
 
-func (rr *rbsReader) Close() error {
+// Close conforms to the io.Closer interface
+//
+// This will also close the underlying Redis connection
+func (rr *RedReader) Close() error {
 	rr.conn.Close()
 	rr.quit = true
 	return nil
 }
 
-func (rr *rbsReader) Read(p []byte) (int, error) {
+// Read conforms to the io.Reader interface
+//
+// It is recommended that the buffer p is at least as big as
+// ((lookahead + 1) X maxChunkSize), otherwise you run the risk of
+// receiving an io.ErrShortBuffer error.
+//
+// (Receiving a io.ErrShortBuffer is not necessarily a fatal condition:
+// the Read will try to "keep its place" in the stream and delivery
+// what bytes it can per invocation.)
+//
+// This implementation has one very specific behavior: if the end-of-stream
+// marker has not yet been written, but there are currently no bytes to
+// deliver, the error ErrStarveEOF is returned.
+//
+// If the byte stream is already fully written, or would be by the Read's
+// get to the end-of-stream marker, this acts just like any other io.Reader
+func (rr *RedReader) Read(p []byte) (int, error) {
 	if rr.quit {
 		return 0, io.ErrClosedPipe
 	}
@@ -120,7 +139,7 @@ func (rr *rbsReader) Read(p []byte) (int, error) {
 			continue
 		}
 		// Too much data fetched for the buffer sent in
-		// (This may not be fatal, if `peek` is non-zero.)
+		// (This may not be fatal, if peek is non-zero.)
 		if size+len(b) > len(p) {
 			short = true
 			clearBuffer = true
@@ -153,7 +172,7 @@ func (rr *rbsReader) Read(p []byte) (int, error) {
 	}
 
 	if size == 0 {
-		// At the exhortation of the `io.Reader` interface, we should
+		// At the exhortation of the io.Reader interface, we should
 		// NOT send `0, nil`... We should return some signature of WHY we
 		// are returning with size zero.
 		return size, ErrStarveEOF
@@ -162,7 +181,10 @@ func (rr *rbsReader) Read(p []byte) (int, error) {
 	return size, nil
 }
 
-type syncReader struct {
+// A SyncReader is the implementation that reads from an underlying io.Reader,
+// and will block then retry upon stimulus if the underlying Reader returned
+// ErrStarveEOF.
+type SyncReader struct {
 	r         io.Reader
 	ctx       context.Context
 	cxl       context.CancelFunc
@@ -174,16 +196,38 @@ type syncReader struct {
 	channels  []interface{}
 }
 
-// SyncReader TODO: more
-func SyncReader(
+// NewSyncReader creates an io.ReadCloser that reads bytes from an underlying
+// io.Reader. However, if the underlying io.Reader returned an ErrStarveEOF,
+// this implementation will block until receiving a Redis PubSub stimulus,
+// whereupon it will attempt to read from the underlying io.Reader again.
+//
+// The intendend usage for SyncReader is to be used with a RedReader (or any
+// io.Reader that sends the same ErrStarveEOF), but
+// it would function as a simple pass through for any other io.Reader.
+//
+// This accepts a Context object, so a client can set a timeout, or cancel
+// reading mid-stream.
+//
+// The passed-in Redis connection *MUST* be different the one used in the
+// underlying RedReader, as this pub/sub subscription cannot also
+// handle concurrent transactional needs.
+//
+// The client is expected to provide (at least) one pub/sub channel upon which
+// this implementation will listen for syncronization events.
+//
+// Configuration is by functional options, as inspired by this blog post:
+// http://dave.cheney.net/2014/10/17/functional-options-for-friendly-apis
+//
+// See: SyncSub, SyncStdSub, SyncStarve
+func NewSyncReader(
 	parent context.Context,
 	r io.Reader,
 	subs redis.Conn,
-	options ...func(*syncReader) error,
+	options ...func(*SyncReader) error,
 ) (io.ReadCloser, error) {
 	ctx, cxl := context.WithCancel(parent)
 	stim := make(chan struct{})
-	result := &syncReader{
+	result := &SyncReader{
 		r:       r,
 		ctx:     ctx,
 		cxl:     cxl,
@@ -220,18 +264,20 @@ func SyncReader(
 	return result, nil
 }
 
-// Subscribe to an arbitrary Redis PubSub channel for `Read(...)` stimulus
-func Subscribe(pubSubChan interface{}) func(*syncReader) error {
-	return func(sr *syncReader) error {
+// SyncSub allows a client to add an arbitrary Redis PubSub channel
+// to listen to for stimulus
+func SyncSub(pubSubChan interface{}) func(*SyncReader) error {
+	return func(sr *SyncReader) error {
 		sr.channels = append(sr.channels, pubSubChan)
 		return nil
 	}
 }
 
-// StdSync sets up the subscription for on the package "standard" channel
-func StdSync() func(*syncReader) error {
-	return func(sr *syncReader) error {
-		r, ok := sr.r.(*rbsReader)
+// SyncStdSub sets up the "standard" channel subscription. This is the
+// Read-side counterpart to WriteStdPub
+func SyncStdSub() func(*SyncReader) error {
+	return func(sr *SyncReader) error {
+		r, ok := sr.r.(*RedReader)
 		if !ok {
 			return fmt.Errorf("Expected `*rbs.NewReader`: %T", sr.r)
 		}
@@ -240,16 +286,21 @@ func StdSync() func(*syncReader) error {
 	}
 }
 
-// Starve sets the maximum amount of time to wait between stimulus, and
-// if tripped, the reader will return `io.ErrUnexpectedEOF`
-func Starve(dur time.Duration) func(*syncReader) error {
-	return func(sr *syncReader) error {
+// SyncStarve sets the maximum amount of time to wait between stimulus/Read
+// attempts. If this timeout is tripped, the reader will
+// return io.ErrUnexpectedEOF
+func SyncStarve(dur time.Duration) func(*SyncReader) error {
+	return func(sr *SyncReader) error {
 		sr.starveDur = dur
 		return nil
 	}
 }
 
-func (sr *syncReader) Close() error {
+// Close conforms to the io.Closer interface
+//
+// This will close the passed in Redis connection AND the passed in
+// Reader if it also implements io.Closer
+func (sr *SyncReader) Close() error {
 	sr.cxl()
 	for _, closer := range sr.closers {
 		closer.Close()
@@ -258,14 +309,19 @@ func (sr *syncReader) Close() error {
 	return nil
 }
 
-func (sr *syncReader) starveAfter() <-chan time.Time {
+func (sr *SyncReader) starveAfter() <-chan time.Time {
 	if sr.starveDur == 0 {
 		return nil
 	}
 	return time.After(sr.starveDur)
 }
 
-func (sr *syncReader) Read(p []byte) (n int, err error) {
+// Read conforms to the io.Reader interface
+//
+// This will pass through any results from the underlying Read, unless
+// we recieved an ErrStarveEOF, whereupon it will block and re-attempt
+// a Read when it receives pub/sub stimulus.
+func (sr *SyncReader) Read(p []byte) (n int, err error) {
 	if sr.ctx.Err() != nil {
 		// Error if we're already closed
 		return 0, io.ErrClosedPipe
@@ -314,7 +370,7 @@ type receiver interface {
 	Receive() interface{}
 }
 
-func (sr *syncReader) pubSubStimulus(stim chan<- struct{}, rec receiver) {
+func (sr *SyncReader) pubSubStimulus(stim chan<- struct{}, rec receiver) {
 	defer close(stim)
 	defer sr.wg.Done()
 	for sr.ctx.Err() == nil {

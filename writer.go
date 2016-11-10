@@ -14,21 +14,9 @@ const DefaultMaxChunkSize uint16 = 2 ^ 10 // 1024
 
 const syncChannelPattern = "rbs:sync:%s"
 
-// A CmdBuilder spits out the parameters that are used for invocation
-// of a Redis command
-type CmdBuilder interface {
-	Build() (string, []interface{}, error)
-}
-
-// CmdBuilderFunc is a function adapter for the `CmdBuilder` interface
-type CmdBuilderFunc func() (string, []interface{}, error)
-
-// Build conforms to the `CmdBuilder` interface
-func (f CmdBuilderFunc) Build() (string, []interface{}, error) {
-	return f()
-}
-
-type rbsWriter struct {
+// An RedWriter is the implementation that stores a variable-length stream
+// of bytes into a Redis hash.
+type RedWriter struct {
 	quit     bool
 	conn     redis.Conn
 	name     string
@@ -39,9 +27,39 @@ type rbsWriter struct {
 	trailers []CmdBuilder
 }
 
-// NewWriter creates the object that will write byte chunks to Redis
-func NewWriter(conn redis.Conn, name string, options ...func(*rbsWriter) error) (io.WriteCloser, error) {
-	w := &rbsWriter{
+// NewWriter creates an io.WriteCloser that will write byte chunks to Redis.
+// The underlying implementation is a *RedWriter.
+//
+// The intendend usage for this is a growing stream of bytes where the full
+// length is not known until the stream is closed. (Though, this does not
+// preclude the ability to be used for streams of known/fixed length.)
+//
+// A single Redis hash is the sole underlying data structure. The name parameter
+// is used as the Redis key, and each chunk of bytes is stored as a
+// field+value pair on the hash. This implementation reserves all field names
+// starting with "c:" (for chunk), but is open to clients using any arbitrary
+// other field names on this hash.
+//
+// Network hits are minimized by using Redis pipelining. Per Write
+// invocation, the buffer is apportioned into configurable-sized chunks,
+// any trailers (arbitrary Redis command configured by the client) are
+// assembled, and all of it is written out to Redis at once.
+//
+// Upon Close, if >0 bytes had been written, a last pipeline is
+// constructed, writing out any buffered data, an end-of-stream marker, and
+// any configured trailers.
+//
+// The default configuration has a 1024-byte maximum chunk size, and a 0-byte
+// minimum chunk size, and no trailers. Clients will want to adjust these
+// parameters to their use cases. (Some factors that may be considered in
+// this tuning: desired ingress/egress data rates; Redis tuning; etc.)
+//
+// Configuration is by functional options, as inspired by this blog post:
+// http://dave.cheney.net/2014/10/17/functional-options-for-friendly-apis
+//
+// See: WriteExpire, WriteMaxChunk, WriteMinChunk, WriteStdPub, WriteTrailer
+func NewWriter(conn redis.Conn, name string, options ...func(*RedWriter) error) (io.WriteCloser, error) {
+	w := &RedWriter{
 		conn:  conn,
 		name:  name,
 		max:   DefaultMaxChunkSize,
@@ -57,9 +75,9 @@ func NewWriter(conn redis.Conn, name string, options ...func(*rbsWriter) error) 
 	return w, nil
 }
 
-// MaxChunkSize overrides the default maximum size per chunk written to Redis
-func MaxChunkSize(max uint16) func(*rbsWriter) error {
-	return func(rw *rbsWriter) error {
+// WriteMaxChunk overrides the default maximum size per chunk written to Redis
+func WriteMaxChunk(max uint16) func(*RedWriter) error {
+	return func(rw *RedWriter) error {
 		if rw.min > max {
 			return fmt.Errorf("size conflict: %d > %d", rw.min, max)
 		}
@@ -69,9 +87,9 @@ func MaxChunkSize(max uint16) func(*rbsWriter) error {
 	}
 }
 
-// MinChunkSize sets the minimums size per chunk written to Redis
-func MinChunkSize(min uint16) func(*rbsWriter) error {
-	return func(rw *rbsWriter) error {
+// WriteMinChunk sets the minimums size per chunk written to Redis
+func WriteMinChunk(min uint16) func(*RedWriter) error {
+	return func(rw *RedWriter) error {
 		if min > rw.max {
 			return fmt.Errorf("size conflict: %d > %d", min, rw.max)
 		}
@@ -80,17 +98,33 @@ func MinChunkSize(min uint16) func(*rbsWriter) error {
 	}
 }
 
-// Trailer provides a way to send arbitrary Redis commands per write
-func Trailer(c CmdBuilder) func(*rbsWriter) error {
-	return func(rw *rbsWriter) error {
+// A CmdBuilder spits out the parameters that are used for invocation
+// of a Redis command
+type CmdBuilder interface {
+	Build() (string, []interface{}, error)
+}
+
+// CmdBuilderFunc is a function adapter for the CmdBuilder interface
+type CmdBuilderFunc func() (string, []interface{}, error)
+
+// Build conforms to the CmdBuilder interface
+func (f CmdBuilderFunc) Build() (string, []interface{}, error) {
+	return f()
+}
+
+// WriteTrailer provides clients a way to configure arbitrary Redis commands
+// to be included per pipeline flush
+func WriteTrailer(c CmdBuilder) func(*RedWriter) error {
+	return func(rw *RedWriter) error {
 		rw.trailers = append(rw.trailers, c)
 		return nil
 	}
 }
 
-// Expires sets the TTL for the underlying hash
-func Expires(sec uint16) func(*rbsWriter) error {
-	return func(rw *rbsWriter) error {
+// WriteExpire sends a Redis EXPIRE command for the underlying hash upon
+// each pipeline flush
+func WriteExpire(sec uint16) func(*RedWriter) error {
+	return func(rw *RedWriter) error {
 		rw.trailers = append(
 			rw.trailers,
 			CmdBuilderFunc(func() (string, []interface{}, error) {
@@ -101,9 +135,12 @@ func Expires(sec uint16) func(*rbsWriter) error {
 	}
 }
 
-// Publish sends a pub/sub publish every time we write out
-func Publish() func(*rbsWriter) error {
-	return func(rw *rbsWriter) error {
+// WriteStdPub sends a standard Redis PUBLISH message for this hash on
+// every pipeline flush. This is inteneded to be used in concert with
+// a standard read-side subscription for synchronizing when there are
+// new bytes to be read.
+func WriteStdPub() func(*RedWriter) error {
+	return func(rw *RedWriter) error {
 		channel := fmt.Sprintf(syncChannelPattern, rw.name)
 		rw.trailers = append(
 			rw.trailers,
@@ -115,7 +152,7 @@ func Publish() func(*rbsWriter) error {
 	}
 }
 
-func (rw *rbsWriter) writeChunk(b []byte) error {
+func (rw *RedWriter) writeChunk(b []byte) error {
 	chunk := fmt.Sprintf(chunkNumber, rw.next)
 	err := rw.conn.Send("HSET", rw.name, chunk, b)
 	if err != nil {
@@ -125,7 +162,7 @@ func (rw *rbsWriter) writeChunk(b []byte) error {
 	return nil
 }
 
-func (rw *rbsWriter) flush() error {
+func (rw *RedWriter) flush() error {
 	for _, builder := range rw.trailers {
 		cmd, parts, err := builder.Build()
 		if err != nil {
@@ -139,9 +176,13 @@ func (rw *rbsWriter) flush() error {
 	return rw.conn.Flush()
 }
 
-// Close is important to write out any leftover bytes, and to add the
-// marker for the `last` index
-func (rw *rbsWriter) Close() error {
+// Close conforms to the io.Closer interface.
+//
+// It is necessary to write out any buffered (leftover) bytes, and to
+// add the end-of-stream marker
+//
+// This finishes by calling Close on the underlyling Redis connection.
+func (rw *RedWriter) Close() error {
 	if rw.quit {
 		return io.ErrClosedPipe
 	}
@@ -171,7 +212,14 @@ func (rw *rbsWriter) Close() error {
 	return nil
 }
 
-func (rw *rbsWriter) Write(p []byte) (int, error) {
+// Write conforms to the io.Writer interface.
+//
+// This is where the incoming buffer is apportioned into chunks, and
+// written out to Redis via a pipeline.
+//
+// There should be at most 1 hit to Redis per Write invocation.
+// (Only fewer if a chunk is less than the configured minimum chunk size.)
+func (rw *RedWriter) Write(p []byte) (int, error) {
 	if rw.quit {
 		return 0, io.ErrClosedPipe
 	}

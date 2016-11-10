@@ -19,8 +19,8 @@ func TestWriterErrors(t *testing.T) {
 	w, err := NewWriter(
 		c,
 		"bubba",
-		MaxChunkSize(5),
-		MinChunkSize(3),
+		WriteMaxChunk(5),
+		WriteMinChunk(3),
 	)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
@@ -89,7 +89,7 @@ func TestWriterInitDefault(t *testing.T) {
 	}
 	defer w.Close()
 
-	base, ok := w.(*rbsWriter)
+	base, ok := w.(*RedWriter)
 	if !ok {
 		t.Errorf("Incorrect type: %T\n", w)
 	}
@@ -114,7 +114,7 @@ func TestWriterInitSizeErrs(t *testing.T) {
 	defer c.Clear()
 
 	// Outsized min
-	w, err := NewWriter(c, "min-err", MinChunkSize(2*DefaultMaxChunkSize))
+	w, err := NewWriter(c, "min-err", WriteMinChunk(2*DefaultMaxChunkSize))
 	if err == nil {
 		t.Errorf("Expected error\n")
 	}
@@ -125,8 +125,8 @@ func TestWriterInitSizeErrs(t *testing.T) {
 	// Undersized max
 	w, err = NewWriter(
 		c, "max-err",
-		MinChunkSize(DefaultMaxChunkSize),
-		MaxChunkSize(DefaultMaxChunkSize/2),
+		WriteMinChunk(DefaultMaxChunkSize),
+		WriteMaxChunk(DefaultMaxChunkSize/2),
 	)
 	if err == nil {
 		t.Errorf("Expected error\n")
@@ -138,8 +138,8 @@ func TestWriterInitSizeErrs(t *testing.T) {
 	// Undersized max
 	w, err = NewWriter(
 		c, "max-err",
-		MinChunkSize(DefaultMaxChunkSize),
-		MaxChunkSize(DefaultMaxChunkSize/2),
+		WriteMinChunk(DefaultMaxChunkSize),
+		WriteMaxChunk(DefaultMaxChunkSize/2),
 	)
 	if err == nil {
 		t.Errorf("Expected error\n")
@@ -151,8 +151,8 @@ func TestWriterInitSizeErrs(t *testing.T) {
 	// Happy path: matching sizes should be okay
 	w, err = NewWriter(
 		c, "min-max",
-		MinChunkSize(DefaultMaxChunkSize/2),
-		MaxChunkSize(DefaultMaxChunkSize/2),
+		WriteMinChunk(DefaultMaxChunkSize/2),
+		WriteMaxChunk(DefaultMaxChunkSize/2),
 	)
 	if err != nil {
 		t.Errorf("Unexpected error: %v\n", err)
@@ -176,16 +176,16 @@ func TestWriterInitTrailers(t *testing.T) {
 	w, err := NewWriter(
 		c,
 		name,
-		Trailer(cfn),
-		Expires(ttl),
-		Publish(),
+		WriteTrailer(cfn),
+		WriteExpire(ttl),
+		WriteStdPub(),
 	)
 	if err != nil {
 		t.Errorf("Unexpected error: %v\n", err)
 	}
 	defer w.Close()
 
-	base, ok := w.(*rbsWriter)
+	base, ok := w.(*RedWriter)
 	if !ok {
 		t.Errorf("Incorrect type: %T\n", w)
 	}
@@ -264,7 +264,7 @@ func TestIntegrationWriterHappyPath(t *testing.T) {
 
 	expire := uint16(10)
 	w, err := NewWriter(tx, name,
-		MaxChunkSize(5), MinChunkSize(3), Expires(expire))
+		WriteMaxChunk(5), WriteMinChunk(3), WriteExpire(expire))
 	if err != nil {
 		t.Fatalf("Unexpected error: %v\n", err)
 	}

@@ -71,7 +71,7 @@ func TestReaderLookaheadHappy(t *testing.T) {
 	defer c.Clear()
 
 	// Peek option
-	r := NewReader(c, name, Lookahead(1))
+	r := NewReader(c, name, ReadLookahead(1))
 
 	dst := make([]byte, 16)
 	for ix := 0; ix < len(bodies); ix += 2 {
@@ -110,7 +110,7 @@ func TestReaderRedisErrorLast(t *testing.T) {
 	c := buildConn(name, true)
 	defer c.Clear()
 	c.Command("HGET", name, chunkLast).ExpectError(fmt.Errorf("Forced"))
-	r := NewReader(c, name, Lookahead(2))
+	r := NewReader(c, name, ReadLookahead(2))
 	defer r.Close()
 
 	n, err := io.Copy(ioutil.Discard, r)
@@ -131,7 +131,7 @@ func TestReaderRedisErrorFlush(t *testing.T) {
 		return fmt.Errorf("forced")
 	}
 
-	r := NewReader(c, name, Lookahead(3))
+	r := NewReader(c, name, ReadLookahead(3))
 	defer r.Close()
 
 	n, err := io.Copy(ioutil.Discard, r)
@@ -150,7 +150,7 @@ func TestReaderRedisErrorSend(t *testing.T) {
 
 	c.GenericCommand("HGET").ExpectError(fmt.Errorf("forced"))
 
-	r := NewReader(c, name, Lookahead(3))
+	r := NewReader(c, name, ReadLookahead(3))
 	defer r.Close()
 
 	n, err := io.Copy(ioutil.Discard, r)
@@ -177,7 +177,7 @@ func TestReaderShortErrorAndRepair(t *testing.T) {
 
 	defer c.Clear()
 
-	r := NewReader(c, name, Lookahead(1))
+	r := NewReader(c, name, ReadLookahead(1))
 	defer r.Close()
 
 	dst := make([]byte, 7)
@@ -213,7 +213,7 @@ func TestReaderUnending(t *testing.T) {
 	defer c.Clear()
 
 	// Peek option
-	r := NewReader(c, name, Lookahead(2))
+	r := NewReader(c, name, ReadLookahead(2))
 
 	dst := make([]byte, 32)
 	for ix := 0; ix < 2; ix++ {
@@ -261,7 +261,7 @@ func (sr *starveReader) Read(p []byte) (int, error) {
 }
 
 func TestSyncReaderStarveAfter(t *testing.T) {
-	r := &syncReader{}
+	r := &SyncReader{}
 	ch := r.starveAfter()
 	if ch != nil {
 		t.Errorf("Expected nil starver: %v\n", ch)
@@ -276,7 +276,7 @@ func TestSyncReaderStarveAfter(t *testing.T) {
 
 func TestSyncReaderStarvation(t *testing.T) {
 	dur := time.Duration(250) * time.Millisecond
-	r := &syncReader{
+	r := &SyncReader{
 		r:         &starveReader{},
 		starveDur: dur,
 		ctx:       context.Background(),
@@ -302,7 +302,7 @@ func TestSyncReaderStarvation(t *testing.T) {
 func TestSyncReaderClose(t *testing.T) {
 	ctx, cxl := context.WithCancel(context.Background())
 	under := &starveReader{}
-	r := &syncReader{
+	r := &SyncReader{
 		r:       under,
 		ctx:     ctx,
 		cxl:     cxl,
@@ -361,7 +361,7 @@ func TestSyncReaderStimulusNoDrain(t *testing.T) {
 	close(ch)
 
 	ctr := &starveReader{}
-	r := &syncReader{
+	r := &SyncReader{
 		r:         ctr,
 		ctx:       context.Background(),
 		stim:      ch,
@@ -390,7 +390,7 @@ func TestSyncReaderStimulusDrain(t *testing.T) {
 	iter := int(2 + (time.Now().Unix() % 5))
 
 	ctr := &starveReader{}
-	r := &syncReader{
+	r := &SyncReader{
 		r:    ctr,
 		ctx:  context.Background(),
 		stim: ch,
@@ -427,7 +427,7 @@ func TestSyncReaderStimulusDrain(t *testing.T) {
 
 func TestSyncReaderHappyPath(t *testing.T) {
 	dst := bytes.NewBufferString("")
-	r := &syncReader{
+	r := &SyncReader{
 		r:   strings.NewReader(alphabet),
 		ctx: context.Background(),
 	}
@@ -466,7 +466,7 @@ func (mock *mockReceiver) Receive() interface{} {
 }
 
 func TestSyncReaderPubSubHappyPath(t *testing.T) {
-	s := &syncReader{ctx: context.Background()}
+	s := &SyncReader{ctx: context.Background()}
 
 	mock := &mockReceiver{
 		ctx:   context.Background(),
@@ -497,7 +497,7 @@ func TestSyncReaderPubSubHappyPath(t *testing.T) {
 
 func TestSyncReaderPubSubBlockedClose(t *testing.T) {
 	ctx, cxl := context.WithCancel(context.Background())
-	s := &syncReader{ctx: ctx, cxl: cxl}
+	s := &SyncReader{ctx: ctx, cxl: cxl}
 
 	mock := &mockReceiver{
 		ctx:   context.Background(),
@@ -527,7 +527,7 @@ func TestSyncReaderPubSubBlockedClose(t *testing.T) {
 }
 
 func TestSyncReaderInitDefaultFail(t *testing.T) {
-	r, err := SyncReader(
+	r, err := NewSyncReader(
 		context.Background(),
 		strings.NewReader(""),
 		redigomock.NewConn(),
@@ -541,11 +541,11 @@ func TestSyncReaderInitDefaultFail(t *testing.T) {
 }
 
 func TestSyncReaderInitStdFail(t *testing.T) {
-	r, err := SyncReader(
+	r, err := NewSyncReader(
 		context.Background(),
 		ioutil.NopCloser(strings.NewReader("")),
 		redigomock.NewConn(),
-		StdSync(),
+		SyncStdSub(),
 	)
 	if err == nil {
 		t.Errorf("Expected error!\n")
@@ -582,18 +582,18 @@ func TestSyncReaderInitStdSuccess(t *testing.T) {
 	expected := fmt.Sprintf(syncChannelPattern, name)
 
 	b := NewReader(redigomock.NewConn(), name)
-	r, err := SyncReader(
+	r, err := NewSyncReader(
 		context.Background(),
 		b,
 		redigomock.NewConn(),
-		StdSync(),
+		SyncStdSub(),
 	)
 	if err != nil {
 		t.Errorf("Unexpected error: %v\n", err)
 	}
 	defer r.Close()
 
-	bare, ok := r.(*syncReader)
+	bare, ok := r.(*SyncReader)
 	if !ok {
 		t.Errorf("Unexpected type: %T\n", r)
 	}
@@ -617,14 +617,14 @@ func TestSyncReaderInitSusbscribeSuccess(t *testing.T) {
 	n3 := fmt.Sprintf("alternate-3-%d", now)
 
 	starve := time.Duration(100+(now%100)) * time.Millisecond
-	r, err := SyncReader(
+	r, err := NewSyncReader(
 		context.Background(),
 		strings.NewReader(""),
 		redigomock.NewConn(),
-		Subscribe(n1),
-		Subscribe(n2),
-		Subscribe(n3),
-		Starve(starve),
+		SyncSub(n1),
+		SyncSub(n2),
+		SyncSub(n3),
+		SyncStarve(starve),
 	)
 
 	if err != nil {
@@ -632,7 +632,7 @@ func TestSyncReaderInitSusbscribeSuccess(t *testing.T) {
 	}
 	defer r.Close()
 
-	bare, ok := r.(*syncReader)
+	bare, ok := r.(*SyncReader)
 	if !ok {
 		t.Errorf("Unexpected type: %T\n", r)
 	}
