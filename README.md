@@ -48,3 +48,9 @@ var dst io.Writer = ...
 
 io.Copy(dst, reader)
 ```
+
+# Credits
+
+(c) 2016 [Orion Labs, Inc.](http://orionlabs.io/)
+
+See [AUTHORS.md](AUTHORS.md) for more details.
