@@ -1,3 +1,17 @@
+// Copyright 2016 Orion Labs, Inc
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package rbs_test
 
 import (
@@ -6,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -20,10 +35,9 @@ func TestIntegrationPackageEnd2End(t *testing.T) {
 	// For localhost, run this test with:
 	//     RBS_TEST_REDIS=localhost:6379
 	env := "RBS_TEST_REDIS"
-	// svr := os.Getenv(env)
-	svr := "localhost:6379"
+	svr := os.Getenv(env)
 	if svr == "" {
-		t.Skipf("No config found for %s", env)
+		t.Skipf("No environment value found for %s", env)
 	}
 
 	srcHash := sha1.New()
@@ -99,7 +113,7 @@ func TestIntegrationPackageEnd2End(t *testing.T) {
 	defer writer.Close()
 
 	buf := make([]byte, 512)
-	n, err := io.CopyBuffer(writer, src, buf)
+	_, err = io.CopyBuffer(writer, src, buf)
 	if err != nil {
 		t.Errorf("Unexpected error: %v\n", err)
 	}
@@ -122,7 +136,7 @@ func TestIntegrationPackageEnd2End(t *testing.T) {
 		t.Errorf("Mismatch hashes: %s - %s\n", sh, dh)
 	}
 
-	t.Logf("Results: %s -> %d / %s\n", name, n, sh)
+	// t.Logf("Results: %s -> %d / %s\n", name, n, sh)
 }
 
 type cancelReader struct {

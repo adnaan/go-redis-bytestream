@@ -1,8 +1,23 @@
+// Copyright 2016 Orion Labs, Inc
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
 package rbs
 
 import (
 	"fmt"
 	"io"
+	"os"
 	"testing"
 	"time"
 
@@ -235,10 +250,9 @@ func TestIntegrationWriterHappyPath(t *testing.T) {
 	// For localhost, run this test with:
 	//     RBS_TEST_REDIS=localhost:6379
 	env := "RBS_TEST_REDIS"
-	// svr := os.Getenv(env)
-	svr := "localhost:6379"
+	svr := os.Getenv(env)
 	if svr == "" {
-		t.Skipf("No config found for %s", env)
+		t.Skipf("No environment value found for %s", env)
 	}
 
 	tx, err := redis.Dial("tcp", svr)
