@@ -42,7 +42,7 @@ ps, _ := redis.Dial(...)  // PubSub connection
 
 reader, err := rbs.NewSyncReader(ctx, rbs.NewReader(rx, name), ps, rbs.SyncStdSub())
 if err != nil {...}
-defer writer.Close()
+defer reader.Close()
 
 var dst io.Writer = ...
 
