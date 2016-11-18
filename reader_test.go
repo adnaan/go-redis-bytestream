@@ -16,6 +16,7 @@ package rbs
 
 import (
 	"bytes"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -311,6 +312,47 @@ func TestSyncReaderStarvation(t *testing.T) {
 		t.Errorf("Unexpected duration: %v\n", diff)
 	}
 	// t.Logf("Diff: %v\n", diff)
+}
+
+type stallReader struct {
+	r      io.Reader
+	remain int
+}
+
+func (sr *stallReader) Read(p []byte) (int, error) {
+	if sr.remain > 0 {
+		sr.remain--
+		return 0, ErrStarveEOF
+	}
+	return sr.r.Read(p)
+}
+
+func TestSyncReaderStarveRetry(t *testing.T) {
+	// If, on a first attempt, there was nothing available, and we then
+	// starve, make sure to retry the read ONE LAST TIME, because hey
+	// we might've missed a stimulus somewhere.
+	dur := time.Duration(250) * time.Millisecond
+	r := &SyncReader{
+		r:         &stallReader{r: rand.Reader, remain: 1},
+		starveDur: dur,
+		ctx:       context.Background(),
+	}
+
+	start := time.Now()
+
+	size := 10
+	n, err := r.Read(make([]byte, size))
+	if n != size {
+		t.Errorf("Unexpected length: %d\n", n)
+	}
+	if err != nil {
+		t.Errorf("Unexpected error: %v\n", err)
+	}
+
+	diff := time.Since(start)
+	if diff < dur {
+		t.Errorf("Unexpected duration: %v\n", diff)
+	}
 }
 
 func TestSyncReaderClose(t *testing.T) {

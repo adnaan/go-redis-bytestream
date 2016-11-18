@@ -340,15 +340,30 @@ func (sr *SyncReader) Read(p []byte) (n int, err error) {
 		// Error if we're already closed
 		return 0, io.ErrClosedPipe
 	}
+	// Don't need to re-assign the starvation window for each iteration
+	starver := sr.starveAfter()
+	starving := false
 	for n == 0 && (err == nil || err == ErrStarveEOF) {
 		n, err = sr.r.Read(p)
+
+		// We only want to proceed on in this function if the underlying
+		// Reader has returned the right error
 		if err != ErrStarveEOF {
 			continue
 		}
 
-		select {
-		case <-sr.starveAfter():
+		// If we've just done our last post-starve check, and there's
+		// still nothing to deliver, then we can FULLY call starved.
+		if starving {
 			return 0, io.ErrUnexpectedEOF
+		}
+
+		select {
+		case <-starver:
+			// Go thru one more time, just to make sure we didn't
+			// miss some stimulus
+			starving = true
+			continue
 		case <-sr.ctx.Done():
 			return 0, io.ErrClosedPipe
 		case _, ok := <-sr.stim:
