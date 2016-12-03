@@ -208,6 +208,7 @@ type SyncReader struct {
 	starveDur time.Duration
 	closers   []io.Closer
 	channels  []interface{}
+	subs      redis.Conn
 }
 
 // NewSyncReader creates an io.ReadCloser that reads bytes from an underlying
@@ -247,6 +248,7 @@ func NewSyncReader(
 		cxl:     cxl,
 		stim:    stim,
 		closers: []io.Closer{subs},
+		subs:    subs,
 	}
 	if c, ok := r.(io.Closer); ok {
 		result.closers = append(result.closers, c)
@@ -316,10 +318,15 @@ func SyncStarve(dur time.Duration) func(*SyncReader) error {
 // Reader if it also implements io.Closer
 func (sr *SyncReader) Close() error {
 	sr.cxl()
+	c := sr.subs
+	if c != nil {
+		c.Send("UNSUBSCRIBE")
+		c.Flush()
+	}
+	sr.wg.Wait()
 	for _, closer := range sr.closers {
 		closer.Close()
 	}
-	sr.wg.Wait()
 	return nil
 }
 
@@ -403,7 +410,7 @@ func (sr *SyncReader) pubSubStimulus(stim chan<- struct{}, rec receiver) {
 	defer close(stim)
 	defer sr.wg.Done()
 	for sr.ctx.Err() == nil {
-		switch rec.Receive().(type) {
+		switch n := rec.Receive().(type) {
 		case redis.Message:
 			select {
 			case stim <- struct{}{}:
@@ -411,11 +418,10 @@ func (sr *SyncReader) pubSubStimulus(stim chan<- struct{}, rec receiver) {
 			case <-sr.ctx.Done():
 				return
 			}
-		// case redis.Subscription:
-		// 	// I don't think we care about this
-		//     if n.Count == 0 {
-		//         return
-		//     }
+		case redis.Subscription:
+			if n.Count == 0 {
+				return
+			}
 		case error:
 			return
 		}
