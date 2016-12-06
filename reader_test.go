@@ -528,9 +528,9 @@ func TestSyncReaderPubSubHappyPath(t *testing.T) {
 		ctx:   context.Background(),
 		delay: time.Duration(100) * time.Millisecond,
 		contents: []interface{}{
-			redis.Subscription{},
+			redis.PMessage{},
 			redis.Message{},
-			redis.Subscription{},
+			redis.PMessage{},
 			redis.Message{},
 		},
 	}

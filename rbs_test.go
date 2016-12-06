@@ -41,7 +41,6 @@ func TestIntegrationPackageEnd2End(t *testing.T) {
 	}
 
 	srcHash := sha1.New()
-	// dstHash := sha1.New()
 	ctx, _ := context.WithTimeout(context.Background(), time.Duration(5)*time.Second)
 	src := io.TeeReader(rand.Reader, srcHash)
 	src = &randomSizeReader{r: src}
@@ -137,6 +136,108 @@ func TestIntegrationPackageEnd2End(t *testing.T) {
 	}
 
 	// t.Logf("Results: %s -> %d / %s\n", name, n, sh)
+}
+
+func TestIntegrationNoStreamEnd2End(t *testing.T) {
+	// For localhost, run this test with:
+	//     RBS_TEST_REDIS=localhost:6379
+	env := "RBS_TEST_REDIS"
+	svr := os.Getenv(env)
+	if svr == "" {
+		t.Skipf("No environment value found for %s", env)
+	}
+
+	// Setup the Redis connection pool
+	pool := &redis.Pool{
+		MaxIdle:     3,
+		IdleTimeout: 10 * time.Second,
+		Dial: func() (redis.Conn, error) {
+			return redis.Dial("tcp", svr)
+		},
+	}
+
+	name := fmt.Sprintf("roundtrip-no-stream-%d", time.Now().UnixNano())
+
+	// First, gotta write out the resource
+	chunkSize := uint16(256)
+	maxSize := 87 + (4 * chunkSize)
+	srcHash := sha1.New()
+	src := io.TeeReader(io.LimitReader(rand.Reader, int64(maxSize)), srcHash)
+
+	tx := pool.Get()
+	defer tx.Close()
+
+	writer, err := rbs.NewWriter(
+		tx,
+		name,
+		rbs.WriteMaxChunk(chunkSize),
+		rbs.WriteExpire(10),
+	)
+	if err != nil {
+		t.Errorf("Unexpected error: %v\n", err)
+	}
+	defer writer.Close()
+
+	n, err := io.Copy(writer, src)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v\n", err)
+	}
+	if n != int64(maxSize) {
+		t.Errorf("Unexpected size: %d\n", n)
+	}
+	writer.Close()
+	srcSum := fmt.Sprintf("%x", srcHash.Sum(nil))
+
+	// Now, try to read the file
+	rx := pool.Get()
+	// defer rx.Close()
+
+	// First, we'll go for the non-sync reader
+	r1 := rbs.NewReader(rx, name, rbs.ReadLookahead(3))
+	defer r1.Close()
+
+	d1Hash := sha1.New()
+	n, err = io.Copy(d1Hash, r1)
+	if err != nil {
+		t.Errorf("Unexpected error: %v\n", err)
+	}
+	if n != int64(maxSize) {
+		t.Errorf("Unexpected size: %d\n", n)
+	}
+	d1Sum := fmt.Sprintf("%x", d1Hash.Sum(nil))
+	if d1Sum != srcSum {
+		t.Errorf("Mismatch contents: %s != %s\n", src, d1Sum)
+	}
+
+	// Lastly, check the sync reader can handle this scenario
+	subs := pool.Get()
+	// defer subs.Close()
+
+	r2, err := rbs.NewSyncReader(
+		context.Background(),
+		rbs.NewReader(rx, name, rbs.ReadLookahead(3)),
+		subs,
+		rbs.SyncStdSub(),
+		rbs.SyncStarve(time.Second),
+	)
+	if err != nil {
+		return
+	}
+	defer r2.Close()
+
+	d2Hash := sha1.New()
+	n, err = io.Copy(d2Hash, r2)
+	if err != nil {
+		t.Errorf("Unexpected error: %v\n", err)
+	}
+	if n != int64(maxSize) {
+		t.Errorf("Unexpected size: %d\n", n)
+	}
+	d2Sum := fmt.Sprintf("%x", d2Hash.Sum(nil))
+	if d2Sum != srcSum {
+		t.Errorf("Mismatch contents: %s != %s\n", src, d2Sum)
+	}
+
 }
 
 type cancelReader struct {
